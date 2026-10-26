@@ -1,0 +1,385 @@
+clc, clear, close all
+window_size_for_export = [0, 50, 1920, 975];
+
+font = 36; %fontsize
+lw = 6;
+lwlrg = 2; %linewidth large
+lwsml = 1; %linewidth small
+
+%% Problem Parameters
+
+mu = 1; % viscosity
+N_range = [10, 100]; % grid size
+N = linspace(N_range(1),N_range(2),(N_range(2)-N_range(1))/15+1); % grid sizes
+
+x_domain = [0,1];
+y_domain = [0,1];
+
+h_x = (x_domain(2)-x_domain(1))./N;
+h_y = (y_domain(2)-y_domain(1))./N;
+
+global Ugd Vgd Pgd
+
+[x_grid_t1,y_grid_t1,x_grid_t2,y_grid_t2,y_grid_t2_SHORT,x_grid_t2_LONG,Ugd,Vgd,Pgd,Cgd,Upnts,Vpnts,Ppnts,Tpnts,...
+SU,SV,CM,f_b,g_b,h_b,A,b,sol,U,V,P,PC,X,Y,XU,YU,XV,YV,XP,YP,Ua,Va,Pa,Ua_shift,Va_shift] = deal(cell(length(N),1));
+
+interpolation_type = {'linear','cubic','spline'};
+
+[UC,VC,mag_u] = deal(cell(length(N),length(interpolation_type)));
+
+%% Matrix Setup and Solving
+
+for n = 1:length(N)
+    Ugd{n} = [N(n)+1,N(n)+2]; % U grid dimensions [x points, y points]
+    Vgd{n} = [N(n)  ,N(n)+1]; % V grid dimensions [x points, y points]
+    Pgd{n} = [N(n)  ,N(n)  ]; % P grid dimensions [x points, y points]
+    Cgd{n} = [N(n)+1,N(n)+1]; % C grid dimensions [x points, y points] Regular Grid
+
+    x_grid_t1{n} =       linspace(x_domain(1)         ,x_domain(2)         ,Cgd{n}(1)  ); % x type 1 grid
+    y_grid_t1{n} =       linspace(y_domain(1)         ,y_domain(2)         ,Cgd{n}(2)  ); % y type 1 grid
+    x_grid_t2{n} =       linspace(x_domain(1)+h_x(n)/2,x_domain(2)-h_x(n)/2,Cgd{n}(1)-1); % x type 2 grid
+    x_grid_t2_LONG{n} =  linspace(x_domain(1)-h_x(n)/2,x_domain(2)+h_x(n)/2,Cgd{n}(1)+1); % x type 2 grid (extends outside domain for interpolating perodic)
+    y_grid_t2{n} =       linspace(y_domain(1)-h_y(n)/2,y_domain(2)+h_y(n)/2,Ugd{n}(2)  ); % y type 2 grid (with ghost nodes)
+    y_grid_t2_SHORT{n} = linspace(y_domain(1)+h_y(n)/2,y_domain(2)-h_y(n)/2,Ugd{n}(2)-2); % y type 2 grid WITHOUT GHOST
+
+    Upnts{n} = prod(Ugd{n});                   % # U     grid points
+    Vpnts{n} = prod(Vgd{n});                   % # V     grid points
+    Ppnts{n} = prod(Pgd{n});                   % # P     grid points
+    Tpnts{n} = Upnts{n} + Vpnts{n} + Ppnts{n}; % # total grid points
+
+    SU{n} = sparse(Upnts{n},Tpnts{n}); % Stokes U   equations matrix
+    SV{n} = sparse(Vpnts{n},Tpnts{n}); % Stokes V   equations matrix
+    CM{n} = sparse(Ppnts{n},Tpnts{n}); % Continuity equations Matrix
+    
+    f_b{n} = zeros(Upnts{n},1); % forcing function vector for first  equation, will get assembled into b vector
+    g_b{n} = zeros(Vpnts{n},1); % forcing function vector for second equation, will get assembled into b vector
+    h_b{n} = zeros(Ppnts{n},1); % forcing function vector for third  equation, will get assembled into b vector
+
+    UC{n} = zeros(Cgd{n}(1),Cgd{n}(2)); % U solution mapped onto nodes
+    VC{n} = zeros(Cgd{n}(1),Cgd{n}(2)); % V solution mapped onto nodes
+    PC{n} = zeros(Cgd{n}(1),Cgd{n}(2)); % P solution mapped onto nodes
+end
+
+for n = 1:length(N)
+    for j = 1:Ugd{n}(2)
+        for i = 1:Ugd{n}(1)
+            
+            k = lcl_i(i,j,Ugd{n}); % "local-global index" within U grid
+
+
+            if     i == 1         % LHS Boundary - periodic
+                imx = Ugd{n}(1); % i max (on RHS boundary)
+                SU{n}(k,g_i(i  ,j  ,'U',n)) =  1;
+                SU{n}(k,g_i(imx,j  ,'U',n)) = -1;
+                f_b{n}(k) = 0;
+            elseif i == Ugd{n}(1) % RHS Boundary - set by BC
+                SU{n}(k,g_i(i  ,j  ,'U',n)) =  1;
+                f_b{n}(k) = sin(2*pi*x_grid_t1{n}(i))*sin(2*pi*y_grid_t2{n}(j));
+            elseif j == 1         % BTM Boundary - ghost nodes
+                SU{n}(k,g_i(i  ,j  ,'U',n)) =  .5;
+                SU{n}(k,g_i(i  ,j+1,'U',n)) =  .5;
+                f_b{n}(k) = 0;
+            elseif j == Ugd{n}(2) % TOP Boundary - ghost nodes
+                SU{n}(k,g_i(i  ,j  ,'U',n)) =  .5;
+                SU{n}(k,g_i(i  ,j-1,'U',n)) =  .5;
+                f_b{n}(k) = 0;
+            else                  % INT (interior point)
+                % Laplacian on U Grid
+                SU{n}(k,g_i(i  ,j  ,'U',n)) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                SU{n}(k,g_i(i+1,j  ,'U',n)) =  1/h_x(n)^2;
+                SU{n}(k,g_i(i-1,j  ,'U',n)) =  1/h_x(n)^2;
+                SU{n}(k,g_i(i  ,j+1,'U',n)) =  1/h_y(n)^2;
+                SU{n}(k,g_i(i  ,j-1,'U',n)) =  1/h_y(n)^2;
+
+                % x_comp of Gradient on P grid
+                SU{n}(k,g_i(i  ,j-1,'P',n)) = -1/h_x(n);
+                SU{n}(k,g_i(i-1,j-1,'P',n)) =  1/h_x(n);
+
+                % Forcing function
+                f_b{n}(k) = (2*pi - 8*mu*pi^2) * sin(2*pi*x_grid_t1{n}(i))*sin(2*pi*y_grid_t2{n}(j));
+            end
+        end
+    end
+    for j = 1:Vgd{n}(2)
+        for i = 1:Vgd{n}(1)
+
+            c2pix = cos(2*pi*x_grid_t2{n}(i));
+            c2piy = cos(2*pi*y_grid_t1{n}(j));
+
+            k = lcl_i(i,j,Vgd{n}); % "local-global index" within V grid
+
+            if j == 1             % BTM Boundary - Direcelet
+                SV{n}(k,g_i(i  ,j  ,'V',n)) =  1;
+                g_b{n}(k) = -3.5;
+            elseif j == Vgd{n}(2) % TOP Boundary - Direcelet
+                SV{n}(k,g_i(i  ,j  ,'V',n)) =  1;
+                g_b{n}(k) = -3.5;
+            elseif     i == 1         % LHS Boundary - periodic
+                imx = Vgd{n}(1); % i max (on RHS boundary)                     %% ORIGINALLY THIS WAS USING Ugd INSTEAD OF Vgd. THIS WAS ERROR I GOT AI TO FIND
+                % Laplacian on V Grid
+                SV{n}(k,g_i(i  ,j  ,'V',n)) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                SV{n}(k,g_i(i+1,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(imx,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(i  ,j+1,'V',n)) =  1/h_y(n)^2;
+                SV{n}(k,g_i(i  ,j-1,'V',n)) =  1/h_y(n)^2;
+
+                % x_comp of Gradient on P grid
+                SV{n}(k,g_i(i  ,j  ,'P',n)) = -1/h_y(n);
+                SV{n}(k,g_i(i  ,j-1,'P',n)) =  1/h_y(n);
+
+                % Forcing function
+                g_b{n}(k) = mu*(4*pi^2*c2pix-8*pi^2*c2pix*c2piy)-2*pi*c2pix*c2piy;
+            elseif i == Vgd{n}(1) % RHS Boundary - periodic
+                % Laplacian on V Grid
+                SV{n}(k,g_i(i  ,j  ,'V',n)) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                SV{n}(k,g_i(1  ,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(i-1,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(i  ,j+1,'V',n)) =  1/h_y(n)^2;
+                SV{n}(k,g_i(i  ,j-1,'V',n)) =  1/h_y(n)^2;
+
+                % x_comp of Gradient on P grid
+                SV{n}(k,g_i(i  ,j  ,'P',n)) = -1/h_y(n);
+                SV{n}(k,g_i(i  ,j-1,'P',n)) =  1/h_y(n);
+
+                % Forcing function
+                g_b{n}(k) = mu*(4*pi^2*c2pix - 8*pi^2*c2pix*c2piy)-2*pi*c2pix*c2piy;
+            else                  % INT (interior point)
+                % Laplacian on V Grid
+                SV{n}(k,g_i(i  ,j  ,'V',n)) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                SV{n}(k,g_i(i+1,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(i-1,j  ,'V',n)) =  1/h_x(n)^2;
+                SV{n}(k,g_i(i  ,j+1,'V',n)) =  1/h_y(n)^2;
+                SV{n}(k,g_i(i  ,j-1,'V',n)) =  1/h_y(n)^2;
+
+                % x_comp of Gradient on P grid
+                SV{n}(k,g_i(i  ,j  ,'P',n)) = -1/h_y(n);
+                SV{n}(k,g_i(i  ,j-1,'P',n)) =  1/h_y(n);
+
+                % Forcing function
+                g_b{n}(k) = mu*(4*pi^2*c2pix-8*pi^2*c2pix*c2piy)-2*pi*c2pix*c2piy;
+            end
+        end
+    end
+    for j = 1:Pgd{n}(2)
+        for i = 1:Pgd{n}(1)
+    
+                k = lcl_i(i,j,Pgd{n}); % "local-global index" within P grid
+    
+                CM{n}(k,g_i(i  ,j  ,'U',n)) = -1/h_x(n);
+                CM{n}(k,g_i(i+1,j  ,'U',n)) =  1/h_x(n);
+    
+                CM{n}(k,g_i(i  ,j+1,'V',n)) =  1/h_y(n);
+                CM{n}(k,g_i(i  ,j  ,'V',n)) = -1/h_y(n);
+        end
+    end
+
+
+    A{n} = [SU{n};SV{n};CM{n}];
+    b{n} = [f_b{n};g_b{n};h_b{n}];
+
+    % A{n}(end,:) = 0; %fixing one of the pressures so it's not arbitirarty
+    % A{n}(end,end) = 1; %fixing one of the pressures so it's not arbitirarty
+
+    sol{n} = A{n}\b{n};
+
+    U{n} = reshape(sol{n}(1                  :Upnts{n}         ),Ugd{n}(1),Ugd{n}(2))';
+    V{n} = reshape(sol{n}(Upnts{n}+1         :Upnts{n}+Vpnts{n}),Vgd{n}(1),Vgd{n}(2))';
+    P{n} = reshape(sol{n}(Upnts{n}+Vpnts{n}+1:end              ),Pgd{n}(1),Pgd{n}(2))';
+    
+    [X{n} ,Y{n} ] = meshgrid(x_grid_t1{n},y_grid_t1{n});
+    [XU{n},YU{n}] = meshgrid(x_grid_t1{n},y_grid_t2{n});
+    [XV{n},YV{n}] = meshgrid(x_grid_t2{n},y_grid_t1{n});
+    [XV{n},YV{n}] = meshgrid(x_grid_t2_LONG{n},y_grid_t1{n});
+    [XP{n},YP{n}] = meshgrid(x_grid_t2{n},y_grid_t2_SHORT{n});
+
+    for type = 1:length(interpolation_type)
+        UC{n,type} = interp2(XU{n},YU{n},U{n}                        ,X{n},Y{n},interpolation_type{type});
+        VC{n,type} = interp2(XV{n},YV{n},[V{n}(:,end),V{n},V{n}(:,1)],X{n},Y{n},interpolation_type{type});
+
+        mag_u{n,type} = sqrt(UC{n,type}.^2 + VC{n,type}.^2);
+    end
+
+    PC{n} = PC{n} - mean(PC{n},'all');
+
+    %% Error Calcs
+    for j = 1:Cgd{n}(2)
+        for i = 1:Cgd{n}(1)
+            Ua{n}(i,j) = sin(2*pi*y_grid_t1{n}(j))*sin(2*pi*x_grid_t1{n}(i));            % analytic solution to U
+            Va{n}(i,j) = -3.5 + cos(2*pi*x_grid_t1{n}(i))*(cos(2*pi*y_grid_t1{n}(j))-1); % analytic solution to V
+        end
+    end
+
+    % On shifted grid
+    for j = 1:Ugd{n}(2)-2
+        for i = 1:Ugd{n}(1)
+            Ua_shift{n}(i,j) = sin(2*pi*y_grid_t2_SHORT{n}(j))*sin(2*pi*x_grid_t1{n}(i));      % analytic solution to U
+        end
+    end
+    for j = 1:Vgd{n}(2)
+        for i = 1:Vgd{n}(1)
+            Va_shift{n}(i,j) = sin(2*pi*y_grid_t1{n}(j))*sin(2*pi*x_grid_t2{n}(i));            % analytic solution to U
+        end
+    end
+
+    
+    for j = 1:Pgd{n}(2)
+        for i = 1:Pgd{n}(1)
+            Pa{n}(i,j) = sin(2*pi*y_grid_t2_SHORT{n}(j))*cos(2*pi*x_grid_t2{n}(i));      % analytic solution to P
+        end
+    end
+
+    Ua{n} = Ua{n}';
+    Va{n} = Va{n}';
+    Ua_shift{n} = Ua_shift{n}';
+    Va_shift{n} = Va_shift{n}';
+    Pa{n} = Pa{n}';
+end
+
+%% Errors Continued
+
+UErr_p_2 = deal(zeros(length(N),1+length(interpolation_type))); % setup arrays to hold errors
+VErr_p_2 = deal(zeros(length(N),1+length(interpolation_type))); % setup arrays to hold errors
+PErr_p_2 = deal(zeros(length(N),1+length(interpolation_type))); % setup arrays to hold errors
+
+for n = 1:length(N)
+    Utop_diff = Ua_shift{n} - U{n}(2:end-1,:); % top of error equation
+    Utop_diff = Utop_diff(:); %flattening
+    UErr_p_2(n,1) = norm(Utop_diff)/norm(Ua_shift{n}(:)); %P-2 Norm Error
+
+    Vtop_diff = Va_shift{n} - V{n}; % top of error equation
+    Vtop_diff = Vtop_diff(:); %flattening
+    VErr_p_2(n,1) = norm(Vtop_diff)/norm(Va_shift{n}(:)); %P-2 Norm Error
+
+    Ptop_diff = Pa{n} - P{n}; % top of error equation
+    Ptop_diff = Ptop_diff(:); %flattening
+    PErr_p_2(n,1) = norm(Ptop_diff)/norm(Pa{n}(:)); %P-2 Norm Error
+
+    for type = 2:length(interpolation_type)+1
+        Utop_diff = Ua{n} - UC{n}; % top of error equation
+        Utop_diff = Utop_diff(:); %flattening
+        UErr_p_2(n,type) = norm(Utop_diff)/norm(Ua{n}(:)); %P-2 Norm Error
+    
+        Vtop_diff = Va{n} - VC{n}; % top of error equation
+        Vtop_diff = Vtop_diff(:); %flattening
+        VErr_p_2(n,type) = norm(Vtop_diff)/norm(Va{n}(:)); %P-2 Norm Error
+    end
+end
+
+% figure(1)
+% surf(X{end},Y{end},Ua{end},FaceAlpha=0.25);
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+% % 
+% hold on
+% surf(X{end},Y{end},UC{end},FaceAlpha=0.75);
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+% 
+% figure(2)
+% surf(X{end},Y{end},Va{end},FaceAlpha=0.25);
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+% 
+% hold on
+% surf(X{end},Y{end},VC{end},FaceAlpha=0.75);
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+% 
+% figure(3)
+% surf(XP{end},YP{end},P{end});
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+
+% figure(4)
+% contourf(X{end},Y{end},mag_u{end},20);
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+
+figure(1)
+t = tiledlayout(1,20);
+nexttile([1, 13]); 
+hold on
+pcolor(X{end},Y{end},mag_u{end,1})
+shading interp;
+colormap(slanCM('bubblegum'));
+xlabel('$x$', 'Interpreter', 'latex');
+ylabel('$y$', 'Interpreter', 'latex');
+title('$||\vec{u}||$',Interpreter='latex')
+c = colorbar;
+set(c, 'TickLabelInterpreter', 'latex');
+stream = streamline(X{end},Y{end},UC{end},VC{end},x_grid_t2{3},1*ones(length(x_grid_t2{3}),1));
+set(stream, 'Color', [1 1 1], 'LineWidth', lwlrg);
+axis square
+fontsize(font,"points")
+set(gca, 'TickLabelInterpreter', 'latex')
+box on
+grid on
+xticks(0:.2:1)
+yticks(0:.2:1)
+ax1 = gca;
+ax1.LineWidth = lwsml;
+
+
+nexttile([1, 7]);
+loglog(N,UErr_p_2,LineWidth=lw,Color='#7E2F8E')
+hold on
+loglog(N,VErr_p_2,LineWidth=lw,Color='#EDB120')
+hold on
+loglog(N,PErr_p_2,LineWidth=lw,Color=[0,0,0])
+legend('$P=\infty$','$P=2$','Interpreter', 'latex',Location='southwest')
+xlabel('$N$', 'Interpreter', 'latex');
+ylabel('Error', 'Interpreter', 'latex');
+title('Relative Error Convergence', 'Interpreter', 'latex');
+fontsize(font,"points")
+grid on
+box on
+set(gca, 'TickLabelInterpreter', 'latex')
+ax2 = gca;
+ax2.LineWidth = lwsml;
+
+
+
+
+set(gcf, 'Position', window_size_for_export);
+exportgraphics(gcf,"HW1_1.jpg")
+
+
+% figure(2)
+% surf(XU{end},YU{end},U{end});
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+
+% figure(2)
+% surf(XV{end},YV{end},V{end}');
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+% 
+% figure(3)
+% surf(XP{end},YP{end},P{end}');
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+
+% figure(4)
+% surf(Y{end},X{end},mag_u{end});
+% xlabel('$x$', 'Interpreter', 'latex');
+% ylabel('$y$', 'Interpreter', 'latex');
+
+
+
+
+
+function k = lcl_i(i,j,Xgd) % "local-global index" within each equation, accepts i and j and what grid we are on
+    k = i + (j-1)*Xgd(1);
+end
+
+function g_i = g_i(i,j,grid,n) %global index function, accepts i and j and which matrix we are in as well as points U, V, and P grid dimensions; returns global index position
+global Ugd Vgd Pgd
+    switch grid
+        case 'U'
+            g_i = 0                     + i + (j-1)*Ugd{n}(1);
+        case 'V'
+            g_i = prod(Ugd{n})             + i + (j-1)*Vgd{n}(1);
+        case 'P'
+            g_i = prod(Ugd{n}) + prod(Vgd{n}) + i + (j-1)*Pgd{n}(1);
+    end
+end

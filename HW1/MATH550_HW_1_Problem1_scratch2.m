@@ -1,0 +1,207 @@
+clc, clear, close all
+window_size_for_export = [0, 50, 1920, 975];
+
+font = 24; %fontsize
+lw = 4.5; %linewidth
+lwlrg = 6; %linewidth large
+lwsml = 3; %linewidth small
+
+%% Problem Parameters
+
+mu = 1; % viscosity
+N_range = [15, 30]; % grid size
+N = linspace(N_range(1),N_range(2),(N_range(2)-N_range(1))/5+1); % grid sizes
+
+x_domain = [0,1];
+y_domain = [0,1];
+
+h_x = (x_domain(2)-x_domain(1))./N;
+h_y = (y_domain(2)-y_domain(1))./N;
+
+[x_grid_t1,y_grid_t1,x_grid_t2,y_grid_t2,f_b,g_b,h_b,A,first_A_row_indices,second_A_row_indices,third_A_row_indices,s_V,s_P,b,sol,U,V,P,X,Y,X2,Y2,mag_u,Ueq,Veq,Deq] = deal(cell(length(N),1));
+
+for n = 1:length(N)
+    x_grid_t1{n} = linspace(x_domain(1),x_domain(2),N(n)+1);                   % x type 1 grid
+    y_grid_t1{n} = linspace(y_domain(1),y_domain(2),N(n)+1);                   % y type 1 grid
+    x_grid_t2{n} = linspace(x_domain(1)+h_x(n)/2,x_domain(2)-h_x(n)/2,N(n));   % x type 2 grid
+    y_grid_t2{n} = linspace(y_domain(1)-h_y(n)/2,y_domain(2)+h_y(n)/2,N(n)+1); % y type 2 grid (including ghost nodes on top/bottom)
+
+    Ueq{n} = N(n)*(N(n)+1);
+    Veq{n} = N(n)*(N(n)+1);
+    Deq{n} = N(n)^2;
+
+    f_b{n} = zeros(Ueq{n},1); % forcing function vector for first  equation, will get assembled into b vector
+    g_b{n} = zeros(Veq{n},1); % forcing function vector for second equation, will get assembled into b vector
+    h_b{n} = zeros(Deq{n},1);    % forcing function vector for third  equation, will get assembled into b vector   
+    
+    A{n} = zeros(Ueq{n}+Veq{n}+Deq{n}); % massive matrix we are solving
+    % A = spalloc(2*(N+1)^2+(N-1)^2,2*(N+1)^2+(N-1)^2,100000);
+    % b = zeros(length(A),1);   % RHS matrix
+    
+    first_A_row_indices{n}  = num2cell(1       :Ueq{n});               % mu*L_U 0 -G_x row
+    second_A_row_indices{n} = num2cell(Ueq{n}+1:Ueq{n}+Veq{n});        % 0 mu*L_U -G_y row
+    third_A_row_indices{n}  = num2cell(Veq{n}+1:Ueq{n}+Veq{n}+Deq{n}); % D_x D_y 0     row
+    
+    %s_U = 0            so not needed
+     s_V{n} = Ueq{n};   % V shift in A array
+     s_P{n} = Ueq{n}+Veq{n}; % P shift in A array
+end
+
+for n = 1:length(N)
+    for eqnum = 1:length(A{n})
+        switch eqnum
+            case first_A_row_indices{n}
+                case_i = eqnum;
+                [i,j] = l_i(case_i,N(n),N(n)+1);
+                boundary_val_i = sin(2*pi*x_grid_t1{n}(i))*sin(2*pi*y_grid_t1{n}(j));
+    
+                if isXBoundary(i,N(n))
+                    % force setting boundary
+                    A{n}(eqnum,case_i) = 1;
+                    f_b{n}(case_i) = boundary_val_i;
+                elseif isYBoundary(j,N(n)+1)
+                    % force setting ghost node boundary
+                    A{n}(eqnum,case_i) = 0.5;
+                    if j == 1 %Bottom boundary
+                        A{n}(eqnum,g_i(i,j+1,N(n)+1)) = 0.5;
+                    else %Top boundary
+                        A{n}(eqnum,g_i(i,j-1,N(n)+1)) = 0.5;
+                    end
+                    f_b{n}(case_i) = boundary_val_i;
+                else
+                    % Laplacian on U Grid
+                    A{n}(eqnum,case_i) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                    A{n}(eqnum,g_i(i,j+1,N(n)+1)) = 1/h_y(n)^2;
+                    A{n}(eqnum,g_i(i,j-1,N(n)+1)) = 1/h_y(n)^2;
+                    A{n}(eqnum,g_i(i+1,j,N(n)+1)) = 1/h_x(n)^2;
+                    A{n}(eqnum,g_i(i-1,j,N(n)+1)) = 1/h_x(n)^2;
+    
+                    % x_comp of Gradient on P grid
+                    A{n}(eqnum,s_P{n}+g_i(i  ,j-1,N(n))) = -1/h_x(n); %j minus 1 since not computing outside domain
+                    A{n}(eqnum,s_P{n}+g_i(i-1,j-1,N(n))) = 1/h_x(n); %j minus 1 since not computing outside domain
+    
+                    % Forcing function
+                    f_b{n}(case_i) = mu*(2*pi - 8*pi^2)*sin(2*pi*x_grid_t1{n}(i))*sin(2*pi*y_grid_t1{n}(j));
+                end
+    
+            case second_A_row_indices{n}
+                case_i = eqnum-s_V{n};
+                [i,j] = l_i(case_i,N(n)+1,N(n));
+                c2pix = cos(2*pi*x_grid_t1{n}(i));
+                c2piy = cos(2*pi*y_grid_t1{n}(j));
+                boundary_val_i = -3.5 + c2pix*(c2piy-1);
+    
+                if isXBoundary(i,N(n)+1)
+                    % force setting ghost node boundary
+                    A{n}(eqnum,case_i) = 0.5;
+                    if i == 1 %LHS boundary
+                        A{n}(eqnum,g_i(i,j+1,N(n)+1)) = 0.5;
+                    else %RHS boundary
+                        A{n}(eqnum,g_i(i,j-1,N(n)+1)) = 0.5;
+                    end
+                    g_b{n}(case_i) = boundary_val_i;
+                    
+                elseif isYBoundary(j,N(n))
+                    % force setting boundary
+                    A{n}(eqnum,s_V{n}+case_i) = 1;
+                    g_b{n}(case_i) = -3.5 + c2pix*(c2piy-1);
+                else
+                    % Laplacian on V Grid
+                    A{n}(eqnum,s_V{n}+case_i) = -2/h_x(n)^2 - 2/h_y(n)^2;
+                    A{n}(eqnum,s_V{n}+g_i(i,j+1,N(n)+1)) = 1/h_y(n)^2;
+                    A{n}(eqnum,s_V{n}+g_i(i,j-1,N(n)+1)) = 1/h_y(n)^2;
+                    A{n}(eqnum,s_V{n}+g_i(i+1,j,N(n)+1)) = 1/h_x(n)^2;
+                    A{n}(eqnum,s_V{n}+g_i(i-1,j,N(n)+1)) = 1/h_x(n)^2;
+    
+                    % y_comp of Gradient on P grid
+                    A{n}(eqnum,s_P{n}+g_i(i-1,j,N(n))) = -1/h_x(n); %i minus 1 since not computing outside domain
+                    A{n}(eqnum,s_P{n}+g_i(i-1,j-1,N(n))) = 1/h_x(n); %i minus 1 since not computing outside domain
+    
+                    % Forcing function
+                    g_b{n}(case_i) = 4*mu*pi^2*c2pix-2*pi*c2pix*c2piy;
+                end
+    
+            case third_A_row_indices{n}
+                case_i = eqnum-s_P{n};
+                [i,j] = l_i(case_i,N(n),N(n)); % on type 1 grid but exluding boundaries since not important here
+    
+                % if isBoundary(i,j,N(n)+1)
+                %     % no more boundaries to set :)
+                % else
+                    % x_comp of Divergence on U grid
+                    % A{n}(eqnum,g_i(i+1,j,N(n)+1)) =  1/(2*h_x(n));
+                    % A{n}(eqnum,g_i(i-1,j,N(n)+1)) = -1/(2*h_x(n));
+                    % 
+                    % % y_comp of Divergence on V grid
+                    % A{n}(eqnum,s_V{n}+g_i(i,j+1,N(n)+1)) =  1/(2*h_y(n));
+                    % A{n}(eqnum,s_V{n}+g_i(i,j-1,N(n)+1)) = -1/(2*h_y(n));
+    
+                    % Forcing function
+                    %h_b = zero for all since divergence of velocity vector field is zero so no need to change it 
+                % end
+        end
+    end
+
+    b{n} = [f_b{n};g_b{n};h_b{n}]; % RHS forcing vector
+
+    sol{n} = A{n}\b{n};
+    
+    U{n} = reshape(sol{n}(1:Ueq{n}),N(n),N(n)+1);
+    V{n} = reshape(sol{n}(Ueq{n}+1:Ueq{n}+Veq{n}),N(n)+1,N(n));
+    P{n} = reshape(sol{n}(Ueq{n}+Veq{n}+1:end),N(n),N(n));
+    
+    [X{n},Y{n}] = meshgrid(x_grid_t1{n},y_grid_t1{n});
+    [X2{n},Y2{n}] = meshgrid(x_grid_t2{n},y_grid_t2{n});
+    
+    mag_u{n} = sqrt(U{n}.^2 + V{n}.^2);
+end
+
+figure(1)
+surf(X{end},Y{end},U{end});
+
+figure(2)
+surf(X{end},Y{end},V{end});
+
+figure(3)
+surf(X2{end},Y2{end},P{end});
+
+figure(4)
+surf(Y{end},X{end},mag_u{end});
+xlabel('$x$', 'Interpreter', 'latex');
+ylabel('$y$', 'Interpreter', 'latex');
+
+
+
+
+
+
+
+function [i,j] = l_i(g_i, Nx, Ny) %local index funciton, accepts a global index and NxN matrix size; returns i and j
+    j = floor((g_i-1)/Ny)+1;
+    i = mod(g_i-1,Nx)+1;
+end
+
+function g_i = g_i(i,j,Ny) %global index function, accepts i and j and NxN matrix size; returns global index position
+    g_i = i + (j-1)*Ny;
+end
+
+function bound = isXBoundary(i,Nx)
+    bound = i == 1 || i == Nx;
+end
+
+function bound = isYBoundary(j,Ny)
+    bound = j == 1 || j == Ny;
+end
+
+% function [i,j] = l_i_nb(g_i,N) % EXCLUDES BOUNDARIES! local index funciton, accepts a global index and NxN matrix size; returns i and j
+%     j = floor((g_i-1)/(N-2))+2;
+%     i = mod(g_i-1,N-2)+2;
+% end
+
+
+
+
+
+
+
+% look at the 
